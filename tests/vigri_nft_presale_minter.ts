@@ -14,15 +14,9 @@ describe("vigri_nft_presale_minter", () => {
   it("initializes global config", async () => {
     const admin = provider.wallet.publicKey;
 
-    // 1) Inspect what the IDL expects for `initialize`
-    const initIx = program.idl.instructions.find(
-      (ix) => ix.name === "initialize"
-    );
-    console.log("IDL initialize instruction:", JSON.stringify(initIx, null, 2));
-
-    // 2) Prepare the accounts we pass to the instruction
+    // GlobalConfig PDA (must match GLOBAL_CONFIG_SEED in Rust)
     const [globalConfigPda] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("global-config")], // seed must match GLOBAL_CONFIG_SEED in Rust
+      [Buffer.from("global-config")],
       program.programId
     );
 
@@ -33,14 +27,6 @@ describe("vigri_nft_presale_minter", () => {
       systemProgram: anchor.web3.SystemProgram.programId,
     };
 
-    console.log("Accounts we pass:", {
-      payer: accounts.payer.toBase58(),
-      admin: accounts.admin.toBase58(),
-      globalConfig: accounts.globalConfig.toBase58(),
-      systemProgram: accounts.systemProgram.toBase58(),
-    });
-
-    // 3) Call `initialize` with args and accounts
     const args = {
       admin,
       collectionMint: admin, // temporary placeholders, just valid Pubkeys

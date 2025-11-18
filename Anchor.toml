@@ -8,11 +8,14 @@ skip-lint = false
 [programs.localnet]
 vigri_nft_presale_minter = "GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk"
 
+[programs.devnet]
+vigri_nft_presale_minter = "GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
