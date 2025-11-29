@@ -174,9 +174,81 @@ pub mod vigri_nft_presale_minter {
     }
 
     // Admin mint (no payment, used for manual grants)
-    pub fn admin_mint(_ctx: Context<AdminMint>, _args: AdminMintArgs) -> Result<()> {
-        // TODO:
-        // - mint NFT of given tier to target wallet
+    pub fn admin_mint(ctx: Context<AdminMint>, args: AdminMintArgs) -> Result<()> {
+        // 1) Load global config and resolve tier
+        let global_config_info = ctx.accounts.global_config.to_account_info();
+        let global_config = &mut ctx.accounts.global_config;
+
+        let idx = args.tier_id as usize;
+        require!(idx < global_config.tiers.len(), PresaleError::InvalidTierId);
+
+        let tier = &mut global_config.tiers[idx];
+
+        // 2) Supply limits
+        require!(tier.supply_minted < tier.supply_total, PresaleError::TierSoldOut);
+
+        let is_ws20 = tier.id == TierId::Ws20 as u8;
+        if !is_ws20 {
+            // Non-WS20 tiers: max 5% for admin mint
+            let max_admin = tier.supply_total / 20; // 5%
+            if max_admin > 0 {
+                require!(tier.admin_minted < max_admin, PresaleError::TierSoldOut);
+            }
+        }
+        // For WS20 we only enforce total supply limit above.
+
+        // 3) Mint 1 NFT to admin (treasury = admin)
+        let cpi_ctx_mint = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            token::MintTo {
+                mint: ctx.accounts.mint.to_account_info(),
+                to: ctx.accounts.admin_token_account.to_account_info(),
+                authority: ctx.accounts.admin.to_account_info(),
+            },
+        );
+        token::mint_to(cpi_ctx_mint, 1)?;
+
+        // 4) Create Metaplex metadata with the same placeholder as public mint
+        let bump = ctx.bumps.global_config;
+        let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
+        let signer: &[&[&[u8]]] = &[signer_seeds];
+
+        let data = DataV2 {
+            name: PLACEHOLDER_NAME.to_string(),
+            symbol: PLACEHOLDER_SYMBOL.to_string(),
+            uri: placeholder_uri_for_index(idx).to_string(),
+            seller_fee_basis_points: 0,
+            creators: None,
+            collection: None,
+            uses: None,
+        };
+
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_metadata_program.to_account_info(),
+            CreateMetadataAccountsV3 {
+                metadata: ctx.accounts.metadata.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                mint_authority: ctx.accounts.admin.to_account_info(),
+                update_authority: global_config_info,
+                payer: ctx.accounts.admin.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                rent: ctx.accounts.rent.to_account_info(),
+            },
+            signer,
+        );
+
+        create_metadata_accounts_v3(
+            cpi_ctx,
+            data,
+            true, // is_mutable
+            true, // update_authority_is_signer (PDA global_config signs)
+            None,
+        )?;
+
+        // 5) Update counters
+        tier.supply_minted += 1;
+        tier.admin_minted += 1;
+
         Ok(())
     }
 }
@@ -208,10 +280,12 @@ pub struct TierConfig {
     pub id: u8,               // must equal TierId as integer
     pub supply_total: u16,    // max allowed supply
     pub supply_minted: u16,   // current mint count
+    pub admin_minted: u16,    // minted via admin_mint
     pub price_lamports: u64,  // price in lamports
     pub kyc_required: bool,   // true for Silver+, WS20
     pub invite_only: bool,    // true for WS20
     pub transferable: bool,   // false for WS20 (soulbound)
+    pub reserved: [u8; 8],    // future flags / counters (do not touch now)
 }
 
 impl TierConfig {
@@ -221,55 +295,67 @@ impl TierConfig {
                 id: TierId::TreeSteel as u8,
                 supply_total: 2000,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 500_000_000, // 0.5 SOL
                 kyc_required: false,
                 invite_only: false,
                 transferable: true,
+                reserved: [0; 8],
             },
             TierId::Bronze => Self {
                 id: TierId::Bronze as u8,
                 supply_total: 1000,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 2_000_000_000, // 2 SOL
                 kyc_required: false,
                 invite_only: false,
                 transferable: true,
+                reserved: [0; 8],
             },
             TierId::Silver => Self {
                 id: TierId::Silver as u8,
                 supply_total: 200,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 10_000_000_000, // 10 SOL
                 kyc_required: true,
                 invite_only: false,
                 transferable: true,
+                reserved: [0; 8],
             },
             TierId::Gold => Self {
                 id: TierId::Gold as u8,
                 supply_total: 100,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 40_000_000_000, // 40 SOL
                 kyc_required: true,
                 invite_only: false,
                 transferable: true,
+                reserved: [0; 8],
             },
             TierId::Platinum => Self {
                 id: TierId::Platinum as u8,
                 supply_total: 20,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 80_000_000_000, // 80 SOL
                 kyc_required: true,
                 invite_only: false,
                 transferable: true,
+                reserved: [0; 8],
             },
             TierId::Ws20 => Self {
                 id: TierId::Ws20 as u8,
                 supply_total: 20,
                 supply_minted: 0,
-                price_lamports: 0,
+                admin_minted: 0,
+                price_lamports: 0, // 0 SOL
                 kyc_required: true,
                 invite_only: true,
                 transferable: false,
+                reserved: [0; 8],
             },
         }
     }
@@ -281,8 +367,11 @@ impl TierConfig {
 pub const PLACEHOLDER_NAME: &str = "VIGRI Mystery NFT";
 pub const PLACEHOLDER_SYMBOL: &str = "VIGRI";
 pub const PLACEHOLDER_URI: &str = "https://example.com/vigri-mystery.json";
-pub const GLOBAL_CONFIG_SEED: &[u8] = b"global-config";
-pub const GLOBAL_CONFIG_SPACE: usize = 8 + 32 * 3 + 1 + 7 + 6 * 16 + 32;
+// Final PDA seed for the presale global config
+pub const GLOBAL_CONFIG_SEED: &[u8] = b"vigri-presale-config";
+
+// Generous space for GlobalConfig + padding + reserved
+pub const GLOBAL_CONFIG_SPACE: usize = 8 + 512;
 
 #[account]
 pub struct GlobalConfig {
@@ -291,6 +380,7 @@ pub struct GlobalConfig {
     pub payment_mint: Pubkey,     // for future SPL payments (v1 can ignore)
     pub is_sales_paused: bool,    // global pause switch
     pub tiers: [TierConfig; 6],   // fixed set of 6 tiers
+    pub reserved: [u8; 64],       // future use, keep zeroed
 }
 
 impl GlobalConfig {
@@ -357,7 +447,6 @@ pub struct MintWs20Args {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct AdminMintArgs {
     pub tier_id: u8,
-    pub recipient: Pubkey,
 }
 
 // ---------------------------------------------
@@ -456,9 +545,46 @@ pub struct MintWs20<'info> {
 
 #[derive(Accounts)]
 pub struct AdminMint<'info> {
+    /// Admin = authority of the program and treasury owner
     #[account(mut)]
     pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [GLOBAL_CONFIG_SEED],
+        bump,
+        has_one = admin,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        init,
+        payer = admin,
+        mint::decimals = 0,
+        mint::authority = admin,
+        mint::freeze_authority = admin,
+    )]
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = admin,
+        associated_token::mint = mint,
+        associated_token::authority = admin,
+    )]
+    pub admin_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: Metaplex metadata account PDA for this mint
+    #[account(mut)]
+    pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex Token Metadata program
+    pub token_metadata_program: Program<'info, Metadata>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
 
 #[error_code]
