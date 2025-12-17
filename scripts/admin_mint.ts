@@ -1,6 +1,6 @@
 // scripts/admin_mint.ts
 // Simple CLI tool to call admin_mint from your local machine.
-// Usage (devnet):
+// Usage (devnet): 
 //   yarn admin-mint <tierId> <count>
 // Example:
 //   yarn admin-mint 5 20   // WS-20, 20 NFTs
@@ -80,9 +80,11 @@ async function main() {
       TOKEN_METADATA_PROGRAM_ID
     );
 
+    const designChoice = tierId === 0 ? 1 : null; // 1=TR, 2=FE 
+
     const adminMintArgs = {
       tierId,
-      recipient: wallet,
+      designChoice,
     };
 
     const adminMintAccounts = {

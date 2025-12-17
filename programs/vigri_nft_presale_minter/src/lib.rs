@@ -9,7 +9,7 @@ use anchor_spl::{
 };
 
 // DataV2 re-exported via anchor_spl::metadata
-use anchor_spl::metadata::mpl_token_metadata::types::DataV2;
+use anchor_spl::metadata::mpl_token_metadata::types::{DataV2, Creator};
 
 
 declare_id!("GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk");
@@ -126,12 +126,31 @@ pub mod vigri_nft_presale_minter {
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
 
+        // serial внутри tier: minted + 1 (до инкремента)
+        let global_config = &mut ctx.accounts.global_config;
+        let tier_idx = args.tier_id as usize;
+        let tier = &mut global_config.tiers[tier_idx];
+        let serial: u16 = tier.supply_minted + 1;
+
+        // Emit event with tier, serial, and computed design key
+        let design_key = resolve_design_key(args.tier_id, serial, args.design_choice)?;
+        emit!(NftMinted {
+            tier_id: args.tier_id,
+            serial,
+            design_key,
+            mint: ctx.accounts.mint.key(),
+        });
+
         let data = DataV2 {
             name: PLACEHOLDER_NAME.to_string(),
             symbol: PLACEHOLDER_SYMBOL.to_string(),
-            uri: placeholder_uri_for_index(idx).to_string(),
-            seller_fee_basis_points: 0,
-            creators: None,
+            uri: build_uri(args.tier_id, serial, args.design_choice)?,
+            seller_fee_basis_points: 250,
+            creators: Some(vec![Creator {
+                address: ctx.accounts.admin.key(),
+                verified: false,
+                share: 100,
+            }]),
             collection: None,
             uses: None,
         };
@@ -213,12 +232,30 @@ pub mod vigri_nft_presale_minter {
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
 
+        let global_config = &mut ctx.accounts.global_config;
+        let tier_idx = args.tier_id as usize;
+        let tier = &mut global_config.tiers[tier_idx];
+        let serial: u16 = tier.supply_minted + 1;
+
+        // Emit event with tier, serial, and computed design key
+        let design_key = resolve_design_key(args.tier_id, serial, args.design_choice)?;
+        emit!(NftMinted {
+            tier_id: args.tier_id,
+            serial,
+            design_key,
+            mint: ctx.accounts.mint.key(),
+        });
+
         let data = DataV2 {
             name: PLACEHOLDER_NAME.to_string(),
             symbol: PLACEHOLDER_SYMBOL.to_string(),
-            uri: placeholder_uri_for_index(idx).to_string(),
-            seller_fee_basis_points: 0,
-            creators: None,
+            uri: build_uri(args.tier_id, serial, args.design_choice)?,
+            seller_fee_basis_points: 250,
+            creators: Some(vec![Creator {
+                address: ctx.accounts.admin.key(),
+                verified: false,
+                share: 100,
+            }]),
             collection: None,
             uses: None,
         };
@@ -365,8 +402,8 @@ impl TierConfig {
 // Global configuration (PDA)
 // ---------------------------------------------
 pub const PLACEHOLDER_NAME: &str = "VIGRI Mystery NFT";
-pub const PLACEHOLDER_SYMBOL: &str = "VIGRI";
-pub const PLACEHOLDER_URI: &str = "https://example.com/vigri-mystery.json";
+pub const PLACEHOLDER_SYMBOL: &str = "VIGRINFT";
+pub const PLACEHOLDER_URI: &str = "https://vigri.ee/metadata/nft/vigri-mystery.json";
 // Final PDA seed for the presale global config
 pub const GLOBAL_CONFIG_SEED: &[u8] = b"vigri-presale-config";
 
@@ -396,15 +433,67 @@ impl GlobalConfig {
     }
 }
 
-fn placeholder_uri_for_index(idx: usize) -> &'static str {
-    match idx {
-        0 => "https://example.com/tree-steel.json",
-        1 => "https://example.com/bronze.json",
-        2 => "https://example.com/silver.json",
-        3 => "https://example.com/gold.json",
-        4 => "https://example.com/platinum.json",
-        5 => "https://example.com/ws20.json",
-        _ => "",
+fn build_uri(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<String> {
+    let serial6 = format!("{:06}", serial);
+
+    let uri = match tier_id {
+        // 0 = Tree/Steel (choice)
+        0 => {
+            let code = match design_choice {
+                Some(1) => "TR",
+                Some(2) => "FE",
+                _ => return err!(PresaleError::InvalidDesignChoice),
+            };
+            format!("https://vigri.ee/metadata/nft/tree-steel/{}/{}.json", code, serial6)
+        }
+
+        // 1 = Bronze -> CU
+        1 => format!("https://vigri.ee/metadata/nft/bronze/CU/{}.json", serial6),
+
+        // 2 = Silver -> AG
+        // Variant (DesignKey 1..10) now computed off-chain from serial,
+        // URI no longer encodes vXX.
+        2 => format!(
+            "https://vigri.ee/metadata/nft/silver/AG/{}.json",
+            serial6
+        ),
+
+        // 3 = Gold -> AU
+        3 => format!("https://vigri.ee/metadata/nft/gold/AU/{}.json", serial6),
+
+        // 4 = Platinum -> PT
+        4 => format!("https://vigri.ee/metadata/nft/platinum/PT/{}.json", serial6),
+
+        // 5 = WS20 -> WS
+        5 => format!("https://vigri.ee/metadata/nft/ws/WS/{}.json", serial6),
+
+        _ => return err!(PresaleError::InvalidTierId),
+    };
+
+    Ok(uri)
+}
+
+#[event]
+pub struct NftMinted {
+    pub tier_id: u8,
+    pub serial: u16,
+    pub design_key: u16,
+    pub mint: Pubkey,
+}
+
+fn resolve_design_key(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<u16> {
+    match tier_id {
+        0 => match design_choice {
+            Some(1) => Ok(1), // TR
+            Some(2) => Ok(2), // FE
+            _ => err!(PresaleError::InvalidDesignChoice),
+        },
+        1 => Ok(1), // CU
+        2 => Ok(((serial - 1) % 10) + 1), // AG: 1..10
+        3 => Ok(serial), // AU
+        4 => Ok(serial), // PT
+        5 => Ok(serial), // WS
+        _ => err!(PresaleError::InvalidTierId),
     }
 }
 
@@ -433,7 +522,10 @@ pub struct UpdateConfigArgs {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct MintNftArgs {
     pub tier_id: u8,
-    // Opaque proof blobs signed off-chain by KYC / invite authority
+    // Only used for tier_id == 0 (Tree/Steel):
+    // 1 = TR (Tree), 2 = FE (Steel)
+    pub design_choice: Option<u8>,
+
     pub kyc_proof: Option<Vec<u8>>,
     pub invite_proof: Option<Vec<u8>>,
 }
@@ -447,6 +539,10 @@ pub struct MintWs20Args {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct AdminMintArgs {
     pub tier_id: u8,
+
+    // Only used for tier_id == 0 (Tree/Steel):
+    // 1 = TR (Tree), 2 = FE (Steel)
+    pub design_choice: Option<u8>,
 }
 
 // ---------------------------------------------
@@ -609,4 +705,7 @@ pub enum PresaleError {
 
     #[msg("Only admin can perform this action")]
     Unauthorized,
+
+    #[msg("Invalid design choice for this tier")]
+    InvalidDesignChoice,
 }
