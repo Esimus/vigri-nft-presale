@@ -5,12 +5,15 @@ use anchor_lang::system_program;
 use anchor_spl::{
     associated_token::AssociatedToken,
     token::{self, Mint, Token, TokenAccount},
-    metadata::{create_metadata_accounts_v3, CreateMetadataAccountsV3, Metadata},
+    metadata::{
+        create_metadata_accounts_v3, CreateMetadataAccountsV3,
+        create_master_edition_v3, CreateMasterEditionV3,
+        Metadata,
+    },
 };
 
 // DataV2 re-exported via anchor_spl::metadata
-use anchor_spl::metadata::mpl_token_metadata::types::{DataV2, Creator};
-
+use anchor_spl::metadata::mpl_token_metadata::types::{Creator, DataV2};
 
 declare_id!("GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk");
 
@@ -121,18 +124,17 @@ pub mod vigri_nft_presale_minter {
         );
         token::mint_to(cpi_ctx_mint, 1)?;
 
-        // 7) Create Metaplex metadata with placeholder (mystery box)
+        // 7) Create Metaplex metadata
         let bump = ctx.bumps.global_config;
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
 
-        // serial внутри tier: minted + 1 (до инкремента)
+        // Serial inside tier: minted + 1 (before increment)
         let global_config = &mut ctx.accounts.global_config;
         let tier_idx = args.tier_id as usize;
         let tier = &mut global_config.tiers[tier_idx];
         let serial: u16 = tier.supply_minted + 1;
 
-        // Emit event with tier, serial, and computed design key
         let design_key = resolve_design_key(args.tier_id, serial, args.design_choice)?;
         emit!(NftMinted {
             tier_id: args.tier_id,
@@ -141,8 +143,11 @@ pub mod vigri_nft_presale_minter {
             mint: ctx.accounts.mint.key(),
         });
 
+        // On-chain name shown by wallets (must be short enough for Metaplex constraints)
+        let onchain_name = build_name(args.tier_id, serial, args.design_choice)?;
+
         let data = DataV2 {
-            name: PLACEHOLDER_NAME.to_string(),
+            name: onchain_name,
             symbol: PLACEHOLDER_SYMBOL.to_string(),
             uri: build_uri(args.tier_id, serial, args.design_choice)?,
             seller_fee_basis_points: 250,
@@ -161,7 +166,7 @@ pub mod vigri_nft_presale_minter {
                 metadata: ctx.accounts.metadata.to_account_info(),
                 mint: ctx.accounts.mint.to_account_info(),
                 mint_authority: ctx.accounts.payer.to_account_info(),
-                update_authority: global_config_info, // <- вот так
+                update_authority: global_config_info.clone(),
                 payer: ctx.accounts.payer.to_account_info(),
                 system_program: ctx.accounts.system_program.to_account_info(),
                 rent: ctx.accounts.rent.to_account_info(),
@@ -177,12 +182,29 @@ pub mod vigri_nft_presale_minter {
             None, // collection_details
         )?;
 
+        let cpi_ctx_edition = CpiContext::new_with_signer(
+            ctx.accounts.token_metadata_program.to_account_info(),
+            CreateMasterEditionV3 {
+                edition: ctx.accounts.edition.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                update_authority: global_config_info.clone(),
+                mint_authority: ctx.accounts.payer.to_account_info(),
+                payer: ctx.accounts.payer.to_account_info(),
+                metadata: ctx.accounts.metadata.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                rent: ctx.accounts.rent.to_account_info(),
+            },
+            signer,
+        );
+
+        create_master_edition_v3(cpi_ctx_edition, Some(0))?;
+
         // 8) Reserve one slot in supply for this mint
         tier.supply_minted += 1;
 
         Ok(())
     }
-
 
     // Special mint for WS-20 (invite-only, soulbound)
     pub fn mint_ws20(_ctx: Context<MintWs20>, _args: MintWs20Args) -> Result<()> {
@@ -227,11 +249,12 @@ pub mod vigri_nft_presale_minter {
         );
         token::mint_to(cpi_ctx_mint, 1)?;
 
-        // 4) Create Metaplex metadata with the same placeholder as public mint
+        // 4) Create Metaplex metadata (same naming logic as public mint)
         let bump = ctx.bumps.global_config;
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
 
+        // Serial inside tier: minted + 1 (before increment)
         let global_config = &mut ctx.accounts.global_config;
         let tier_idx = args.tier_id as usize;
         let tier = &mut global_config.tiers[tier_idx];
@@ -246,8 +269,11 @@ pub mod vigri_nft_presale_minter {
             mint: ctx.accounts.mint.key(),
         });
 
+        // On-chain name shown by wallets (must match public mint)
+        let onchain_name = build_name(args.tier_id, serial, args.design_choice)?;
+
         let data = DataV2 {
-            name: PLACEHOLDER_NAME.to_string(),
+            name: onchain_name,
             symbol: PLACEHOLDER_SYMBOL.to_string(),
             uri: build_uri(args.tier_id, serial, args.design_choice)?,
             seller_fee_basis_points: 250,
@@ -266,7 +292,7 @@ pub mod vigri_nft_presale_minter {
                 metadata: ctx.accounts.metadata.to_account_info(),
                 mint: ctx.accounts.mint.to_account_info(),
                 mint_authority: ctx.accounts.admin.to_account_info(),
-                update_authority: global_config_info,
+                update_authority: global_config_info.clone(),
                 payer: ctx.accounts.admin.to_account_info(),
                 system_program: ctx.accounts.system_program.to_account_info(),
                 rent: ctx.accounts.rent.to_account_info(),
@@ -281,6 +307,24 @@ pub mod vigri_nft_presale_minter {
             true, // update_authority_is_signer (PDA global_config signs)
             None,
         )?;
+
+        let cpi_ctx_edition = CpiContext::new_with_signer(
+            ctx.accounts.token_metadata_program.to_account_info(),
+            CreateMasterEditionV3 {
+                edition: ctx.accounts.edition.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                update_authority: global_config_info.clone(),
+                mint_authority: ctx.accounts.admin.to_account_info(),
+                payer: ctx.accounts.admin.to_account_info(),
+                metadata: ctx.accounts.metadata.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                rent: ctx.accounts.rent.to_account_info(),
+            },
+            signer,
+        );
+
+        create_master_edition_v3(cpi_ctx_edition, Some(0))?;
 
         // 5) Update counters
         tier.supply_minted += 1;
@@ -404,6 +448,7 @@ impl TierConfig {
 pub const PLACEHOLDER_NAME: &str = "VIGRI Mystery NFT";
 pub const PLACEHOLDER_SYMBOL: &str = "VIGRINFT";
 pub const PLACEHOLDER_URI: &str = "https://vigri.ee/metadata/nft/vigri-mystery.json";
+
 // Final PDA seed for the presale global config
 pub const GLOBAL_CONFIG_SEED: &[u8] = b"vigri-presale-config";
 
@@ -451,12 +496,9 @@ fn build_uri(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<Stri
         1 => format!("https://vigri.ee/metadata/nft/bronze/CU/{}.json", serial6),
 
         // 2 = Silver -> AG
-        // Variant (DesignKey 1..10) now computed off-chain from serial,
+        // Variant (DesignKey 1..10) is computed off-chain from serial.
         // URI no longer encodes vXX.
-        2 => format!(
-            "https://vigri.ee/metadata/nft/silver/AG/{}.json",
-            serial6
-        ),
+        2 => format!("https://vigri.ee/metadata/nft/silver/AG/{}.json", serial6),
 
         // 3 = Gold -> AU
         3 => format!("https://vigri.ee/metadata/nft/gold/AU/{}.json", serial6),
@@ -471,6 +513,36 @@ fn build_uri(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<Stri
     };
 
     Ok(uri)
+}
+
+fn build_name(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<String> {
+    // Base label by tier
+    let base_label = match tier_id {
+        0 => "Tree/Steel",
+        1 => "Bronze",
+        2 => "Silver",
+        3 => "Gold",
+        4 => "Platinum",
+        5 => "WS-20",
+        _ => return err!(PresaleError::InvalidTierId),
+    };
+
+    // For Tree/Steel we specify by design_choice
+    let label = if tier_id == 0 {
+        match design_choice {
+            Some(1) => "Tree",
+            Some(2) => "Steel",
+            _ => base_label, // fallback
+        }
+    } else {
+        base_label
+    };
+
+    // Metaplex name limit is strict; keep it short and deterministic
+    let serial6 = format!("{:06}", serial);
+    let name = format!("VIGRI {} NFT #{}", label, serial6);
+
+    Ok(name)
 }
 
 #[event]
@@ -623,6 +695,10 @@ pub struct MintNft<'info> {
     #[account(mut)]
     pub metadata: UncheckedAccount<'info>,
 
+    /// CHECK: Metaplex master edition PDA for this mint
+    #[account(mut)]
+    pub edition: UncheckedAccount<'info>,
+
     /// CHECK: Metaplex Token Metadata program
     pub token_metadata_program: Program<'info, Metadata>,
 
@@ -673,6 +749,10 @@ pub struct AdminMint<'info> {
     /// CHECK: Metaplex metadata account PDA for this mint
     #[account(mut)]
     pub metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Metaplex master edition PDA for this mint
+    #[account(mut)]
+    pub edition: UncheckedAccount<'info>,
 
     /// CHECK: Metaplex Token Metadata program
     pub token_metadata_program: Program<'info, Metadata>,
