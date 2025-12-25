@@ -8,11 +8,12 @@ use anchor_spl::{
     metadata::{
         create_metadata_accounts_v3, CreateMetadataAccountsV3,
         create_master_edition_v3, CreateMasterEditionV3,
+        set_and_verify_collection, SetAndVerifyCollection,
         Metadata,
     },
 };
 
-// DataV2 re-exported via anchor_spl::metadata
+// DataV2 / Creator / Collection re-exported via anchor_spl::metadata
 use anchor_spl::metadata::mpl_token_metadata::types::{Creator, DataV2};
 
 declare_id!("GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk");
@@ -21,7 +22,9 @@ declare_id!("GmrUAwBvC3ijaM2L7kjddQFMWHevxRnArngf7jFx1yEk");
 pub mod vigri_nft_presale_minter {
     use super::*;
 
-    // One-time global initialization
+    // -----------------------------------------
+    // 1) One-time global initialization
+    // -----------------------------------------
     pub fn initialize(ctx: Context<Initialize>, args: InitializeArgs) -> Result<()> {
         let global_config = &mut ctx.accounts.global_config;
 
@@ -35,7 +38,9 @@ pub mod vigri_nft_presale_minter {
         Ok(())
     }
 
-    // Admin config update (prices, flags, pause)
+    // -----------------------------------------
+    // 2) Admin config update (prices, flags, pause)
+    // -----------------------------------------
     pub fn update_config(ctx: Context<UpdateConfig>, args: UpdateConfigArgs) -> Result<()> {
         let global_config = &mut ctx.accounts.global_config;
 
@@ -75,7 +80,18 @@ pub mod vigri_nft_presale_minter {
         Ok(())
     }
 
-    // Public mint for regular tiers (Tree/Steel, Bronze, Silver, Gold, Platinum)
+    // -----------------------------------------
+    // 3) Admin: update collection_mint in GlobalConfig
+    // -----------------------------------------
+    pub fn update_collection_mint(ctx: Context<UpdateCollectionMint>) -> Result<()> {
+        let global_config = &mut ctx.accounts.global_config;
+        global_config.collection_mint = ctx.accounts.new_collection_mint.key();
+        Ok(())
+    }
+
+    // -----------------------------------------
+    // 4) Public mint for regular tiers
+    // -----------------------------------------
     pub fn mint_nft(ctx: Context<MintNft>, args: MintNftArgs) -> Result<()> {
         // Clone AccountInfo before taking a mutable reference
         let global_config_info = ctx.accounts.global_config.to_account_info();
@@ -124,7 +140,7 @@ pub mod vigri_nft_presale_minter {
         );
         token::mint_to(cpi_ctx_mint, 1)?;
 
-        // 7) Create Metaplex metadata
+        // 7) Prepare signer seeds for PDA (GlobalConfig as update_authority / collection_authority)
         let bump = ctx.bumps.global_config;
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
@@ -132,6 +148,7 @@ pub mod vigri_nft_presale_minter {
         // Serial inside tier: minted + 1 (before increment)
         let global_config = &mut ctx.accounts.global_config;
         let tier_idx = args.tier_id as usize;
+        let collection_mint_key = global_config.collection_mint;
         let tier = &mut global_config.tiers[tier_idx];
         let serial: u16 = tier.supply_minted + 1;
 
@@ -146,6 +163,7 @@ pub mod vigri_nft_presale_minter {
         // On-chain name shown by wallets (must be short enough for Metaplex constraints)
         let onchain_name = build_name(args.tier_id, serial, args.design_choice)?;
 
+        // DataV2: collection will be set via set_and_verify_collection
         let data = DataV2 {
             name: onchain_name,
             symbol: PLACEHOLDER_SYMBOL.to_string(),
@@ -160,6 +178,7 @@ pub mod vigri_nft_presale_minter {
             uses: None,
         };
 
+        // 7a) Создаём metadata
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_metadata_program.to_account_info(),
             CreateMetadataAccountsV3 {
@@ -182,6 +201,7 @@ pub mod vigri_nft_presale_minter {
             None, // collection_details
         )?;
 
+        // 7b) Creating a master edition
         let cpi_ctx_edition = CpiContext::new_with_signer(
             ctx.accounts.token_metadata_program.to_account_info(),
             CreateMasterEditionV3 {
@@ -200,13 +220,35 @@ pub mod vigri_nft_presale_minter {
 
         create_master_edition_v3(cpi_ctx_edition, Some(0))?;
 
-        // 8) Reserve one slot in supply for this mint
+        // 7c) We link the NFT to the collection and immediately verify it (if collection_mint is configured)
+        if collection_mint_key != Pubkey::default() {
+            let cpi_ctx_collection = CpiContext::new_with_signer(
+                ctx.accounts.token_metadata_program.to_account_info(),
+                SetAndVerifyCollection {
+                    metadata: ctx.accounts.metadata.to_account_info(),
+                    collection_authority: global_config_info.clone(),
+                    payer: ctx.accounts.payer.to_account_info(),
+                    update_authority: global_config_info.clone(),
+                    collection_mint: ctx.accounts.collection_mint.to_account_info(),
+                    collection_metadata: ctx.accounts.collection_metadata.to_account_info(),
+                    collection_master_edition: ctx.accounts.collection_master_edition.to_account_info(),
+                },
+                signer,
+            );
+
+            // collection_authority_record = None (there is no separate recording PDA)
+            set_and_verify_collection(cpi_ctx_collection, None)?;
+        }
+
+        // 8) Updating counters
         tier.supply_minted += 1;
 
         Ok(())
     }
 
-    // Special mint for WS-20 (invite-only, soulbound)
+    // -----------------------------------------
+    // 5) Special mint for WS-20 (invite-only, soulbound)
+    // -----------------------------------------
     pub fn mint_ws20(_ctx: Context<MintWs20>, _args: MintWs20Args) -> Result<()> {
         // TODO:
         // - verify WS invite proof
@@ -214,11 +256,15 @@ pub mod vigri_nft_presale_minter {
         Ok(())
     }
 
-    // Admin mint (no payment, used for manual grants)
+    // -----------------------------------------
+    // 6) Admin mint (no payment, used for manual grants)
+    // -----------------------------------------
     pub fn admin_mint(ctx: Context<AdminMint>, args: AdminMintArgs) -> Result<()> {
         // 1) Load global config and resolve tier
         let global_config_info = ctx.accounts.global_config.to_account_info();
         let global_config = &mut ctx.accounts.global_config;
+
+        let collection_mint_key = global_config.collection_mint;
 
         let idx = args.tier_id as usize;
         require!(idx < global_config.tiers.len(), PresaleError::InvalidTierId);
@@ -249,7 +295,7 @@ pub mod vigri_nft_presale_minter {
         );
         token::mint_to(cpi_ctx_mint, 1)?;
 
-        // 4) Create Metaplex metadata (same naming logic as public mint)
+        // 4) Prepare signer seeds for PDA (GlobalConfig)
         let bump = ctx.bumps.global_config;
         let signer_seeds: &[&[u8]] = &[GLOBAL_CONFIG_SEED, &[bump]];
         let signer: &[&[&[u8]]] = &[signer_seeds];
@@ -282,10 +328,11 @@ pub mod vigri_nft_presale_minter {
                 verified: false,
                 share: 100,
             }]),
-            collection: None,
+            collection: None, // will be displayed and verified below
             uses: None,
         };
 
+        // 4a) Creating metadata
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_metadata_program.to_account_info(),
             CreateMetadataAccountsV3 {
@@ -308,6 +355,7 @@ pub mod vigri_nft_presale_minter {
             None,
         )?;
 
+        // 4b) Master edition
         let cpi_ctx_edition = CpiContext::new_with_signer(
             ctx.accounts.token_metadata_program.to_account_info(),
             CreateMasterEditionV3 {
@@ -325,6 +373,25 @@ pub mod vigri_nft_presale_minter {
         );
 
         create_master_edition_v3(cpi_ctx_edition, Some(0))?;
+
+        // 4c) Bind to the collection and verify (if collection_mint is configured)
+        if collection_mint_key != Pubkey::default() {
+            let cpi_ctx_collection = CpiContext::new_with_signer(
+                ctx.accounts.token_metadata_program.to_account_info(),
+                SetAndVerifyCollection {
+                    metadata: ctx.accounts.metadata.to_account_info(),
+                    collection_authority: global_config_info.clone(),
+                    payer: ctx.accounts.admin.to_account_info(),
+                    update_authority: global_config_info.clone(),
+                    collection_mint: ctx.accounts.collection_mint.to_account_info(),
+                    collection_metadata: ctx.accounts.collection_metadata.to_account_info(),
+                    collection_master_edition: ctx.accounts.collection_master_edition.to_account_info(),
+                },
+                signer,
+            );
+
+            set_and_verify_collection(cpi_ctx_collection, None)?;
+        }
 
         // 5) Update counters
         tier.supply_minted += 1;
@@ -489,25 +556,41 @@ fn build_uri(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Result<Stri
                 Some(2) => "FE",
                 _ => return err!(PresaleError::InvalidDesignChoice),
             };
-            format!("https://vigri.ee/metadata/nft/tree-steel/{}/{}.json", code, serial6)
+            format!(
+                "https://vigri.ee/metadata/nft/tree-steel/{}/{}.json",
+                code, serial6
+            )
         }
 
         // 1 = Bronze -> CU
-        1 => format!("https://vigri.ee/metadata/nft/bronze/CU/{}.json", serial6),
+        1 => format!(
+            "https://vigri.ee/metadata/nft/bronze/CU/{}.json",
+            serial6
+        ),
 
         // 2 = Silver -> AG
-        // Variant (DesignKey 1..10) is computed off-chain from serial.
-        // URI no longer encodes vXX.
-        2 => format!("https://vigri.ee/metadata/nft/silver/AG/{}.json", serial6),
+        2 => format!(
+            "https://vigri.ee/metadata/nft/silver/AG/{}.json",
+            serial6
+        ),
 
         // 3 = Gold -> AU
-        3 => format!("https://vigri.ee/metadata/nft/gold/AU/{}.json", serial6),
+        3 => format!(
+            "https://vigri.ee/metadata/nft/gold/AU/{}.json",
+            serial6
+        ),
 
         // 4 = Platinum -> PT
-        4 => format!("https://vigri.ee/metadata/nft/platinum/PT/{}.json", serial6),
+        4 => format!(
+            "https://vigri.ee/metadata/nft/platinum/PT/{}.json",
+            serial6
+        ),
 
         // 5 = WS20 -> WS
-        5 => format!("https://vigri.ee/metadata/nft/ws/WS/{}.json", serial6),
+        5 => format!(
+            "https://vigri.ee/metadata/nft/ws/WS/{}.json",
+            serial6
+        ),
 
         _ => return err!(PresaleError::InvalidTierId),
     };
@@ -560,11 +643,11 @@ fn resolve_design_key(tier_id: u8, serial: u16, design_choice: Option<u8>) -> Re
             Some(2) => Ok(2), // FE
             _ => err!(PresaleError::InvalidDesignChoice),
         },
-        1 => Ok(1), // CU
+        1 => Ok(1),                     // CU
         2 => Ok(((serial - 1) % 10) + 1), // AG: 1..10
-        3 => Ok(serial), // AU
-        4 => Ok(serial), // PT
-        5 => Ok(serial), // WS
+        3 => Ok(serial),                // AU
+        4 => Ok(serial),                // PT
+        5 => Ok(serial),                // WS
         _ => err!(PresaleError::InvalidTierId),
     }
 }
@@ -618,7 +701,7 @@ pub struct AdminMintArgs {
 }
 
 // ---------------------------------------------
-// Account context structs (skeletons)
+// Account context structs
 // ---------------------------------------------
 
 #[derive(Accounts)]
@@ -656,6 +739,22 @@ pub struct UpdateConfig<'info> {
 }
 
 #[derive(Accounts)]
+pub struct UpdateCollectionMint<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [GLOBAL_CONFIG_SEED],
+        bump,
+        has_one = admin,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    pub new_collection_mint: Account<'info, Mint>,
+}
+
+#[derive(Accounts)]
 pub struct MintNft<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -667,12 +766,26 @@ pub struct MintNft<'info> {
     )]
     pub global_config: Account<'info, GlobalConfig>,
 
-    /// CHECK: admin is validated by the `address = global_config.admin` constraint
+    /// CHECK: Metaplex admin / treasury, validated by address = global_config.admin
     #[account(
         mut,
         address = global_config.admin,
     )]
     pub admin: UncheckedAccount<'info>,
+
+    /// CHECK: Mint collections (must match global_config.collection_mint)
+    #[account(
+        address = global_config.collection_mint,
+    )]
+    pub collection_mint: UncheckedAccount<'info>,
+
+    /// CHECK: Metadata аккаунт коллекции
+    #[account(mut)]
+    pub collection_metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Master edition коллекции
+    #[account(mut)]
+    pub collection_master_edition: UncheckedAccount<'info>,
 
     #[account(
         init,
@@ -728,6 +841,20 @@ pub struct AdminMint<'info> {
         has_one = admin,
     )]
     pub global_config: Account<'info, GlobalConfig>,
+
+    /// CHECK: Mint collections (must match global_config.collection_mint)
+    #[account(
+        address = global_config.collection_mint,
+    )]
+    pub collection_mint: UncheckedAccount<'info>,
+
+    /// CHECK: Metadata account collection
+    #[account(mut)]
+    pub collection_metadata: UncheckedAccount<'info>,
+
+    /// CHECK: Master Edition Collection
+    #[account(mut)]
+    pub collection_master_edition: UncheckedAccount<'info>,
 
     #[account(
         init,

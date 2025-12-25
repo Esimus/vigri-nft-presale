@@ -338,10 +338,10 @@ describe("vigri_nft_presale_minter", () => {
       console.log("admin_mint Platinum tx:", tx);
     };
 
-    // Первый admin_mint для Platinum — должен пройти
+    // First admin_mint for Platinum - must pass
     await doAdminMintOnce();
 
-    // Второй admin_mint для Platinum — должен упасть по лимиту 5%
+    // The second admin_mint for Platinum should fall under the 5% limit
     try {
       await doAdminMintOnce();
       throw new Error(
